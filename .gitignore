@@ -20,3 +20,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+test_audio.wav
+
+tts_test*.wav
+tts_test*.pcm
