@@ -10,10 +10,19 @@ class Item(BaseModel):
 
 
 class TransactionExtraction(BaseModel):
-    intent: Literal["credit", "payment", "balance", "unknown"]
+    intent: Literal[
+        "add_credit",
+        "add_payment",
+        "check_balance",
+        "daily_summary",
+        "undo_last",
+        "unknown",
+    ]
     customer_name: str | None = None
     amount: int | None = Field(default=None, gt=0)
     items: list[Item] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"]
+    amount_ambiguous: bool = False
     description: str | None = None
 
 
