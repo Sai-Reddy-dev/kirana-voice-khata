@@ -19,18 +19,20 @@ VALID_EXTRACTION = {
 
 def configure_gemini(
     monkeypatch: pytest.MonkeyPatch,
-    response: SimpleNamespace | None = None,
+    responses: list[SimpleNamespace] | None = None,
     error: Exception | None = None,
 ) -> dict[str, object]:
-    captured: dict[str, object] = {}
+    captured: dict[str, object] = {"call_count": 0}
+    queued_responses = list(responses or [])
 
     class FakeModels:
         def generate_content(self, **kwargs: object) -> SimpleNamespace:
             captured.update(kwargs)
+            captured["call_count"] = int(captured["call_count"]) + 1
             if error is not None:
                 raise error
-            assert response is not None
-            return response
+            assert queued_responses
+            return queued_responses.pop(0)
 
     class FakeClient:
         def __init__(self, *, api_key: str) -> None:
@@ -47,7 +49,7 @@ def test_extract_transaction_returns_validated_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     response = SimpleNamespace(parsed=VALID_EXTRACTION, text=None)
-    captured = configure_gemini(monkeypatch, response=response)
+    captured = configure_gemini(monkeypatch, responses=[response])
 
     result = extractor.extract_transaction("  Ramesh ki 250 rupayalu appu  ")
 
@@ -62,6 +64,8 @@ def test_extract_transaction_returns_validated_model(
     assert config.system_instruction == extractor._PROMPT_PATH.read_text(
         encoding="utf-8"
     )
+    assert config.temperature == 0
+    assert captured["call_count"] == 1
 
 
 def test_extract_transaction_rejects_blank_transcript(
@@ -73,31 +77,66 @@ def test_extract_transaction_rejects_blank_transcript(
         extractor.extract_transaction(" \t\n ")
 
 
-def test_extract_transaction_rejects_malformed_response(
+def test_extract_transaction_retries_invalid_response_then_returns_valid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    response = SimpleNamespace(parsed=None, text="{not-json")
-    configure_gemini(monkeypatch, response=response)
+    invalid_response = SimpleNamespace(parsed=None, text="{not-json")
+    valid_response = SimpleNamespace(parsed=VALID_EXTRACTION, text=None)
+    captured = configure_gemini(
+        monkeypatch, responses=[invalid_response, valid_response]
+    )
 
-    with pytest.raises(ValueError, match="malformed extraction JSON"):
-        extractor.extract_transaction("Ramesh ki appu raayi")
+    result = extractor.extract_transaction("Ramesh ki appu raayi")
+
+    assert result.model_dump() == VALID_EXTRACTION
+    assert captured["call_count"] == 2
 
 
-def test_extract_transaction_rejects_invalid_model_data(
+def test_extract_transaction_returns_safe_unknown_after_two_invalid_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    invalid_extraction = {**VALID_EXTRACTION, "intent": "credit"}
-    response = SimpleNamespace(parsed=invalid_extraction, text=None)
-    configure_gemini(monkeypatch, response=response)
+    malformed_response = SimpleNamespace(parsed=None, text="{not-json")
+    invalid_extraction = {**VALID_EXTRACTION, "amount": 0}
+    invalid_model_response = SimpleNamespace(parsed=invalid_extraction, text=None)
+    captured = configure_gemini(
+        monkeypatch, responses=[malformed_response, invalid_model_response]
+    )
 
-    with pytest.raises(ValueError, match="does not match TransactionExtraction"):
-        extractor.extract_transaction("Ramesh ki 250 rupayalu appu")
+    result = extractor.extract_transaction("Ramesh ki 250 rupayalu appu")
+
+    assert result == TransactionExtraction(
+        intent="unknown",
+        customer_name=None,
+        amount=None,
+        items=[],
+        confidence="low",
+        amount_ambiguous=True,
+        description=None,
+    )
+    assert captured["call_count"] == 2
 
 
 def test_extract_transaction_reports_gemini_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    configure_gemini(monkeypatch, error=OSError("service unavailable"))
+    captured = configure_gemini(monkeypatch, error=OSError("service unavailable"))
 
     with pytest.raises(RuntimeError, match="Gemini transaction extraction request failed"):
         extractor.extract_transaction("Ramesh ki 250 rupayalu appu")
+    assert captured["call_count"] == 1
+
+def test_extract_transaction_retries_invalid_model_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_extraction = {**VALID_EXTRACTION, "intent": "credit"}
+    invalid_response = SimpleNamespace(parsed=invalid_extraction, text=None)
+    valid_response = SimpleNamespace(parsed=VALID_EXTRACTION, text=None)
+
+    captured = configure_gemini(
+        monkeypatch, responses=[invalid_response, valid_response]
+    )
+
+    result = extractor.extract_transaction("Ramesh ki 250 rupayalu appu")
+
+    assert result.model_dump() == VALID_EXTRACTION
+    assert captured["call_count"] == 2

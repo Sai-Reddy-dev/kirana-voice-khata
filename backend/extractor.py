@@ -30,32 +30,50 @@ def extract_transaction(transcript: str) -> TransactionExtraction:
 
     try:
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=_MODEL,
-            contents=transcript.strip(),
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=TransactionExtraction,
-                temperature=0,
-            ),
-        )
     except Exception as error:
         raise RuntimeError("Gemini transaction extraction request failed") from error
 
-    parsed: Any = response.parsed
-    if parsed is None:
-        response_text = response.text
-        if not isinstance(response_text, str):
-            raise ValueError("Gemini returned no structured extraction response")
+    for attempt in range(2):
         try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError as error:
-            raise ValueError("Gemini returned malformed extraction JSON") from error
+            response = client.models.generate_content(
+                model=_MODEL,
+                contents=transcript.strip(),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=TransactionExtraction,
+                    temperature=0,
+                ),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Gemini transaction extraction request failed"
+            ) from error
 
-    try:
-        return TransactionExtraction.model_validate(parsed)
-    except ValidationError as error:
-        raise ValueError(
-            "Gemini response does not match TransactionExtraction"
-        ) from error
+        try:
+            parsed: Any = response.parsed
+            if parsed is None:
+                response_text = response.text
+                if not isinstance(response_text, str):
+                    raise ValueError("Gemini returned no structured extraction response")
+                try:
+                    parsed = json.loads(response_text)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        "Gemini returned malformed extraction JSON"
+                    ) from error
+
+            return TransactionExtraction.model_validate(parsed)
+        except (ValueError, ValidationError):
+            if attempt == 1:
+                return TransactionExtraction(
+                    intent="unknown",
+                    customer_name=None,
+                    amount=None,
+                    items=[],
+                    confidence="low",
+                    amount_ambiguous=True,
+                    description=None,
+                )
+
+    raise RuntimeError("Gemini transaction extraction retry failed unexpectedly")
