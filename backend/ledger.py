@@ -17,7 +17,8 @@ def _require_customer(connection: sqlite3.Connection, customer_id: int) -> None:
         raise ValueError(f"Unknown customer ID: {customer_id}")
 
 
-def _add_transaction(
+def _add_transaction_on_connection(
+    connection: sqlite3.Connection,
     customer_id: int,
     amount: int,
     transaction_type: str,
@@ -33,21 +34,36 @@ def _add_transaction(
         strict=True,
     )
 
+    _require_customer(connection, transaction.customer_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO transactions (customer_id, transaction_type, amount, description)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            transaction.customer_id,
+            transaction.transaction_type,
+            transaction.amount,
+            transaction.description,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _add_transaction(
+    customer_id: int,
+    amount: int,
+    transaction_type: str,
+    description: str | None,
+) -> int:
     with closing(get_connection()) as connection, connection:
-        _require_customer(connection, transaction.customer_id)
-        cursor = connection.execute(
-            """
-            INSERT INTO transactions (customer_id, transaction_type, amount, description)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                transaction.customer_id,
-                transaction.transaction_type,
-                transaction.amount,
-                transaction.description,
-            ),
+        return _add_transaction_on_connection(
+            connection,
+            customer_id,
+            amount,
+            transaction_type,
+            description,
         )
-        return int(cursor.lastrowid)
 
 
 def add_customer(name: str) -> int:
@@ -87,27 +103,75 @@ def add_payment(
     return _add_transaction(customer_id, amount, "payment", description)
 
 
-def get_balance(customer_id: int) -> int:
-    _validate_positive_integer(customer_id, "customer_id")
-    with closing(get_connection()) as connection, connection:
-        _require_customer(connection, customer_id)
+def get_transaction(transaction_id: int) -> dict:
+    _validate_positive_integer(transaction_id, "transaction_id")
+    with closing(get_connection()) as connection:
         row = connection.execute(
             """
-            SELECT COALESCE(
-                SUM(
-                    CASE transaction_type
-                        WHEN 'credit' THEN amount
-                        WHEN 'payment' THEN -amount
-                    END
-                ),
-                0
-            )
+            SELECT id, customer_id, transaction_type, amount, description,
+                   created_at, is_voided
             FROM transactions
-            WHERE customer_id = ? AND is_voided = 0
+            WHERE id = ?
             """,
-            (customer_id,),
+            (transaction_id,),
         ).fetchone()
-        return int(row[0])
+    if row is None:
+        raise ValueError(f"Unknown transaction ID: {transaction_id}")
+    return dict(
+        zip(
+            (
+                "id",
+                "customer_id",
+                "transaction_type",
+                "amount",
+                "description",
+                "created_at",
+                "is_voided",
+            ),
+            row,
+        )
+    )
+
+
+def _get_balance_on_connection(
+    connection: sqlite3.Connection,
+    customer_id: int,
+) -> int:
+    _validate_positive_integer(customer_id, "customer_id")
+    _require_customer(connection, customer_id)
+    row = connection.execute(
+        """
+        SELECT COALESCE(
+            SUM(
+                CASE transaction_type
+                    WHEN 'credit' THEN amount
+                    WHEN 'payment' THEN -amount
+                END
+            ),
+            0
+        )
+        FROM transactions
+        WHERE customer_id = ? AND is_voided = 0
+        """,
+        (customer_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def list_customers() -> list[dict]:
+    with closing(get_connection()) as connection:
+        rows = connection.execute(
+            "SELECT id, name, created_at FROM customers ORDER BY id ASC"
+        ).fetchall()
+    return [
+        dict(zip(("id", "name", "created_at"), row))
+        for row in rows
+    ]
+
+
+def get_balance(customer_id: int) -> int:
+    with closing(get_connection()) as connection, connection:
+        return _get_balance_on_connection(connection, customer_id)
 
 
 def get_customer_ledger(customer_id: int) -> list[dict]:

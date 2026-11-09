@@ -5,8 +5,15 @@ from pydantic import BaseModel, Field, field_validator
 
 class Item(BaseModel):
     name: str
-    quantity: float | None = Field(default=None, gt=0)
+    quantity: float | None = None
     unit: str | None = None
+
+    @field_validator("quantity")
+    @classmethod
+    def require_positive_quantity(cls, value: float | None) -> float | None:
+        if value is not None and not value > 0:
+            raise ValueError("quantity must be positive")
+        return value
 
 
 class TransactionExtraction(BaseModel):
@@ -19,11 +26,18 @@ class TransactionExtraction(BaseModel):
         "unknown",
     ]
     customer_name: str | None = None
-    amount: int | None = Field(default=None, gt=0)
+    amount: int | None = None
     items: list[Item] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"]
     amount_ambiguous: bool = False
     description: str | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def require_positive_amount(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("amount must be positive")
+        return value
 
 
 class CustomerCreate(BaseModel):
