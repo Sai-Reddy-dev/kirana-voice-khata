@@ -63,3 +63,130 @@ JSON: {"intent":"add_credit","customer_name":"రవి","amount":null,"items":[
 
 Utterance: అతనికి అది చేయి
 JSON: {"intent":"unknown","customer_name":null,"amount":null,"items":[],"confidence":"low","amount_ambiguous":false,"description":null}
+
+
+
+ADDITIONAL EXTRACTION AND SAFETY RULES
+
+1. EXPLICIT TRANSACTION INTENT
+
+Never assume a credit transaction merely because an utterance contains a customer name and an amount.
+
+Use add_credit only when the customer explicitly asks to record goods or money as credit, debt, loan, or outstanding balance.
+
+Use add_payment only when the customer explicitly indicates that money was paid, received, or repaid.
+
+If the transaction type is unclear, use intent="unknown".
+
+Example:
+రమేష్ 250 రూపాయలు
+
+Expected:
+intent = "unknown"
+customer_name = "రమేష్"
+amount = 250
+confidence = "low"
+
+2. TRANSACTIONS WITHOUT AMOUNTS
+
+A missing amount does not mean the transaction intent is unknown.
+
+If the transaction intent and customer are clear, preserve them and set amount=null.
+
+Example:
+రమేష్ డబ్బులు ఇచ్చాడు
+
+Expected:
+intent = "add_payment"
+customer_name = "రమేష్"
+amount = null
+confidence = "high"
+
+3. DESCRIPTION AND ITEMS
+
+Do not duplicate the same product in both description and items.
+
+When an item is extracted into items, do not repeat it in description.
+
+Remove transaction instruction words from descriptions.
+
+Examples of transaction instruction words:
+అప్పుగా
+బాకీకి
+చెల్లించాడు
+కట్టాడు
+paid
+credit
+payment
+loan
+
+Example:
+కిరణ్ కి పాలు అప్పుగా రాయండి
+
+Expected:
+intent = "add_credit"
+customer_name = "కిరణ్"
+amount = null
+description = "పాలు"
+items = []
+
+4. ORDINARY CONVERSATION IS NOT A LEDGER TRANSACTION
+
+Do not interpret ordinary food orders, shopping requests, or unrelated conversation as ledger transactions.
+
+Only extract ledger items when the utterance clearly relates to recording a customer's credit or payment transaction.
+
+Example:
+నాకు ఒక కప్పు టీ ఇవ్వండి
+
+Expected:
+intent = "unknown"
+customer_name = null
+amount = null
+description = null
+items = []
+confidence = "low"
+
+5. CONFIDENCE RULES
+
+Use high confidence when the transaction intent is explicit and unambiguous, even when the amount is missing.
+
+Use medium confidence when the intent is identifiable but some extraction details are uncertain.
+
+Use low confidence when the transaction intent cannot safely be determined.
+
+6. FINANCIAL SAFETY
+
+Never invent a transaction type, customer, amount, or payment direction.
+
+When uncertain about whether money is owed or paid, use intent="unknown".
+
+Never convert an ambiguous amount into a definite amount.
+
+The Python application, not Gemini, is responsible for calculating balances and updating the ledger.
+
+
+7. DESCRIPTION MUST BE PRESERVED WHEN ITEMS ARE EXTRACTED
+
+When a credit transaction includes a product name,
+quantity, and unit, extract the product into items
+AND preserve the product name in description.
+
+Example:
+Ramesh ki 2 kilo biyyam 250 rupayalu appu
+
+Expected:
+description = "biyyam"
+items = [
+  {
+    "name": "biyyam",
+    "quantity": 2.0,
+    "unit": "kilo"
+  }
+]
+
+Do not set description=null when a product name
+is clearly spoken in a valid credit transaction.
+
+For transactions without a product name, description
+may be null.

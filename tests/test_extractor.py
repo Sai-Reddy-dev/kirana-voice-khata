@@ -117,13 +117,26 @@ def test_extract_transaction_returns_safe_unknown_after_two_invalid_responses(
 
 
 def test_extract_transaction_reports_gemini_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    captured = configure_gemini(monkeypatch, error=OSError("service unavailable"))
+    transcript = "Ramesh ki 250 rupayalu appu"
+    error = OSError(
+        "503 service unavailable; API_KEY=test-api-key "
+        "Authorization: Bearer abc123; request=Ramesh ki 250 rupayalu appu"
+    )
+    bearer_credential = "dummy-bearer-" + "credential-123"
+    error = OSError(str(error) + " Authorization: Bearer " + bearer_credential)
+    captured = configure_gemini(monkeypatch, error=error)
 
     with pytest.raises(RuntimeError, match="Gemini transaction extraction request failed"):
-        extractor.extract_transaction("Ramesh ki 250 rupayalu appu")
+        extractor.extract_transaction(transcript)
     assert captured["call_count"] == 1
+    assert "OSError" in caplog.text
+    assert "service unavailable" in caplog.text
+    assert "test-api-key" not in caplog.text
+    assert bearer_credential not in caplog.text
+    assert transcript not in caplog.text
+
 
 def test_extract_transaction_retries_invalid_model_data(
     monkeypatch: pytest.MonkeyPatch,
