@@ -405,6 +405,49 @@ Before you begin, ensure you have:
 
 ***
 
+## Kirana Voice Khata Voice API (Phase 5)
+
+`POST /api/voice` accepts multipart form data:
+
+* `audio_file`: recorded audio file.
+* `language`: `te-IN` or `en-IN`; defaults to `te-IN`.
+* `pending_id`: optional existing pending transaction ID, required when the transcript is spoken `avunu`/`అవును` or `vaddu`/`వద్దు`.
+
+The JSON response includes `transcript`, the existing pipeline `result`, `spoken_reply`, optional base64 WAV `audio`, and `timings_ms` for STT, pipeline, TTS, and total server processing time. Read-only balance and summary results omit TTS audio. A spoken confirmation/cancellation calls the existing pending-entry operations; it does not rerun extraction.
+
+### Missing customer confirmation
+
+`POST /api/text` accepts an optional `pending_id` for a text decision. When a
+transaction names an unknown customer, the response has status
+`customer_creation_confirmation`, a `pending_id`, the preserved transaction
+details, and a Telugu `question` (with an English `question_en`).
+
+Send `{"text":"అవును","pending_id":<id>}` or `{"text":"avunu","pending_id":<id>}`
+to create the customer after a fresh customer-resolution check. A successful
+response contains the normal `confirmation_required` transaction card and a new
+`pending_id`; send a second `avunu` with that returned ID to write the ledger
+entry. Creating the customer alone never records the transaction. Send
+`వద్దు` or `vaddu` with the original ID to cancel without creating either.
+If declining the later transaction card, send it with the newer ID; that
+cancels the transaction while leaving the already-created customer in place.
+
+The `/api/voice` endpoint supports the same two-step flow using `pending_id`
+and spoken `అవును`/`avunu` or `వద్దు`/`vaddu`. Use the pending ID returned with
+each response; the customer-creation request expires under the normal pending
+request timeout.
+
+Prisma v3 is configured with `PRISMA_API_KEY` and `PRISMA_BASE_URL` in `.env`. Timbre v2.5 uses `TIMBRE_API_KEY` and `TIMBRE_BASE_URL`. WAV, MP3, OGG, FLAC, AAC, and M4A inputs are passed through. WebM/Opus and video/MP4 inputs are converted to WAV using `ffmpeg`; install ffmpeg and make it available on `PATH` to enable those formats.
+
+To send a recorded file to a running local API:
+
+```powershell
+python scripts\test_voice.py .\test_audio.wav --base-url http://127.0.0.1:8000
+```
+
+For a spoken confirmation, include `--pending-id <id>`. Latency is reported per request; the under-six-second target is not guaranteed by this synchronous provider integration.
+
+***
+
 ## Next Steps
 
 * **Speech-to-Text**: [Overview](https://docs.gnani.ai/api/STT/overview.md), [STT REST](https://docs.gnani.ai/api/STT/speech-to-text.md) and [STT Realtime](https://docs.gnani.ai/api/STT/stt-websocket.md)

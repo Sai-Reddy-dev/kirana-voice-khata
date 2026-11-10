@@ -25,3 +25,6 @@ test_audio.wav
 
 tts_test*.wav
 tts_test*.pcm
+
+# Local voice request logs
+data/voice_requests.jsonl

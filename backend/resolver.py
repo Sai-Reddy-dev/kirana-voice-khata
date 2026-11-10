@@ -1,3 +1,4 @@
+import sqlite3
 from contextlib import closing
 
 from rapidfuzz import fuzz, process
@@ -15,7 +16,11 @@ def normalize_customer_name(name: str) -> str:
     return " ".join(words)
 
 
-def resolve_customer(name: str, threshold: int = 75) -> dict:
+def resolve_customer_on_connection(
+    connection: sqlite3.Connection,
+    name: str,
+    threshold: int = 75,
+) -> dict:
     if (
         not isinstance(threshold, int)
         or isinstance(threshold, bool)
@@ -27,10 +32,9 @@ def resolve_customer(name: str, threshold: int = 75) -> dict:
     if not normalized_name:
         return {"status": "not_found", "matches": []}
 
-    with closing(get_connection()) as connection:
-        customers = connection.execute(
-            "SELECT id, name, normalized_name FROM customers"
-        ).fetchall()
+    customers = connection.execute(
+        "SELECT id, name, normalized_name FROM customers"
+    ).fetchall()
 
     if not customers:
         return {"status": "not_found", "matches": []}
@@ -75,3 +79,8 @@ def resolve_customer(name: str, threshold: int = 75) -> dict:
         status = "matched"
 
     return {"status": status, "matches": matches}
+
+
+def resolve_customer(name: str, threshold: int = 75) -> dict:
+    with closing(get_connection()) as connection:
+        return resolve_customer_on_connection(connection, name, threshold)

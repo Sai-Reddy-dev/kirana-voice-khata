@@ -49,7 +49,14 @@ def init_db() -> None:
                     CHECK (status IN ('pending', 'processing', 'confirmed', 'expired')),
                 extraction_json TEXT,
                 candidate_customer_ids_json TEXT NOT NULL DEFAULT '[]',
-                cancelled_at TEXT
+                cancelled_at TEXT,
+                interaction_state TEXT NOT NULL DEFAULT 'transaction_confirmation'
+                    CHECK (interaction_state IN (
+                        'transaction_confirmation',
+                        'customer_creation_confirmation',
+                        'customer_created'
+                    )),
+                resumed_pending_id INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_transactions_customer_id
@@ -77,6 +84,15 @@ def init_db() -> None:
             ),
             "cancelled_at": (
                 "ALTER TABLE pending_entries ADD COLUMN cancelled_at TEXT"
+            ),
+            "interaction_state": (
+                "ALTER TABLE pending_entries ADD COLUMN interaction_state TEXT "
+                "NOT NULL DEFAULT 'transaction_confirmation' CHECK "
+                "(interaction_state IN ('transaction_confirmation', "
+                "'customer_creation_confirmation', 'customer_created'))"
+            ),
+            "resumed_pending_id": (
+                "ALTER TABLE pending_entries ADD COLUMN resumed_pending_id INTEGER"
             ),
         }
         for column, statement in migrations.items():

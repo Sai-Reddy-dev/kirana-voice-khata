@@ -373,8 +373,78 @@ def test_unknown_customer_is_not_created_from_text(
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "customer_not_found"
+    assert response.json()["status"] == "customer_creation_confirmation"
+    assert response.json()["interaction_state"] == "customer_creation_confirmation"
+    assert response.json()["question"] == (
+        "New Customer అనే కస్టమర్ లేరు. కొత్త కస్టమర్‌గా సృష్టించాలా?"
+    )
     assert ledger.list_customers() == []
+
+
+def test_text_confirmation_creates_customer_then_requires_transaction_confirmation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    initial = client.post("/api/text", json={"text": "Ramu owes 500"})
+    creation_pending_id = initial.json()["pending_id"]
+
+    created = client.post(
+        "/api/text",
+        json={"text": "అవును", "pending_id": creation_pending_id},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["status"] == "confirmation_required"
+    assert created.json()["pending_id"] != creation_pending_id
+    assert created.json()["customer_creation_pending_id"] == creation_pending_id
+    customer_id = created.json()["customer"]["customer_id"]
+    assert ledger.get_customer_ledger(customer_id) == []
+
+    confirmed = client.post(
+        "/api/text",
+        json={"text": "avunu", "pending_id": created.json()["pending_id"]},
+    )
+    duplicate = client.post(
+        "/api/text",
+        json={"text": "avunu", "pending_id": created.json()["pending_id"]},
+    )
+
+    assert confirmed.json()["status"] == "confirmed"
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["status"] == "already_confirmed"
+    assert len(ledger.get_customer_ledger(customer_id)) == 1
+
+
+def test_text_vaddu_cancels_missing_customer_request(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = client.post("/api/text", json={"text": "Ramu owes 500"})
+
+    cancelled = client.post(
+        "/api/text",
+        json={
+            "text": "వద్దు",
+            "pending_id": pending.json()["pending_id"],
+        },
+    )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert ledger.list_customers() == []
+    with closing(database.get_connection()) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM transactions"
+        ).fetchone()[0] == 0
+
+
+def test_text_confirmation_requires_a_pending_id(client: TestClient) -> None:
+    response = client.post("/api/text", json={"text": "avunu"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["status"] == "pending_id_required"
 
 
 def test_invalid_text_request_returns_validation_error(client: TestClient) -> None:

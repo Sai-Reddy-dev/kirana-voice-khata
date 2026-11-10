@@ -17,6 +17,33 @@ def _require_customer(connection: sqlite3.Connection, customer_id: int) -> None:
         raise ValueError(f"Unknown customer ID: {customer_id}")
 
 
+def _add_customer_on_connection(
+    connection: sqlite3.Connection,
+    name: str,
+) -> int:
+    trimmed_name = CustomerCreate(name=name).name
+    normalized_name = " ".join(trimmed_name.lower().split())
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO customers (name, normalized_name)
+            VALUES (?, ?)
+            """,
+            (trimmed_name, normalized_name),
+        )
+    except sqlite3.IntegrityError as error:
+        existing = connection.execute(
+            "SELECT 1 FROM customers WHERE normalized_name = ?",
+            (normalized_name,),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(
+                f"Customer already exists: {normalized_name}"
+            ) from error
+        raise
+    return int(cursor.lastrowid)
+
+
 def _add_transaction_on_connection(
     connection: sqlite3.Connection,
     customer_id: int,
@@ -67,28 +94,8 @@ def _add_transaction(
 
 
 def add_customer(name: str) -> int:
-    trimmed_name = CustomerCreate(name=name).name
-    normalized_name = " ".join(trimmed_name.lower().split())
     with closing(get_connection()) as connection, connection:
-        try:
-            cursor = connection.execute(
-                """
-                INSERT INTO customers (name, normalized_name)
-                VALUES (?, ?)
-                """,
-                (trimmed_name, normalized_name),
-            )
-        except sqlite3.IntegrityError as error:
-            existing = connection.execute(
-                "SELECT 1 FROM customers WHERE normalized_name = ?",
-                (normalized_name,),
-            ).fetchone()
-            if existing is not None:
-                raise ValueError(
-                    f"Customer already exists: {normalized_name}"
-                ) from error
-            raise
-        return int(cursor.lastrowid)
+        return _add_customer_on_connection(connection, name)
 
 
 def add_credit(

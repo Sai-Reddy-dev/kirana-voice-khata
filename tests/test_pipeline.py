@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -118,8 +118,19 @@ def test_no_customer_match_asks_before_adding_customer(
 
     result = pipeline.handle_text("New Customer bought rice")
 
-    assert result["status"] == "customer_not_found"
-    assert "Would you like to add this customer?" in result["question"]
+    assert result["status"] == "customer_creation_confirmation"
+    assert result["interaction_state"] == "customer_creation_confirmation"
+    assert result["question"] == (
+        "New Customer అనే కస్టమర్ లేరు. కొత్త కస్టమర్‌గా సృష్టించాలా?"
+    )
+    assert result["question_en"] == (
+        "Customer New Customer does not exist. "
+        "Would you like to create this customer?"
+    )
+    assert result["transaction"]["items"] == [
+        {"name": "rice", "quantity": 2.0, "unit": "kg"}
+    ]
+    assert result["transaction"]["description"] == "rice"
     assert result["pending_id"] == 1
     assert resolver.resolve_customer("New Customer") == {
         "status": "not_found",
@@ -127,6 +138,271 @@ def test_no_customer_match_asks_before_adding_customer(
     }
     with closing(database.get_connection()) as connection:
         assert connection.execute("SELECT COUNT(*) FROM customers").fetchone()[0] == 0
+
+
+def test_customer_creation_confirmation_resumes_without_saving_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    initial = pipeline.handle_text("Ramu owes 500")
+    original_pending_id = initial["pending_id"]
+
+    resumed = pipeline.confirm_pending(original_pending_id)
+
+    assert resumed["status"] == "confirmation_required"
+    assert resumed["pending_id"] != original_pending_id
+    assert resumed["customer_creation_pending_id"] == original_pending_id
+    assert resumed["customer_created"] is True
+    assert resumed["transaction"] == initial["transaction"]
+    assert len(ledger.list_customers()) == 1
+    customer_id = resumed["customer"]["customer_id"]
+    assert ledger.get_customer_ledger(customer_id) == []
+    assert pipeline.get_pending_entry(original_pending_id)["interaction_state"] == (
+        "customer_created"
+    )
+
+    repeated_creation_confirmation = pipeline.confirm_pending(original_pending_id)
+    assert repeated_creation_confirmation["status"] == "confirmation_required"
+    assert repeated_creation_confirmation["pending_id"] == resumed["pending_id"]
+    assert ledger.get_customer_ledger(customer_id) == []
+
+    confirmed = pipeline.confirm_pending(resumed["pending_id"])
+    repeated_transaction_confirmation = pipeline.confirm_pending(resumed["pending_id"])
+    assert confirmed["status"] == "confirmed"
+    assert repeated_transaction_confirmation["status"] == "already_confirmed"
+    assert len(ledger.get_customer_ledger(customer_id)) == 1
+    assert _transaction_count() == 1
+
+
+def test_concurrent_confirmation_of_same_customer_creation_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+    barrier = Barrier(2)
+
+    def confirm_at_once() -> dict[str, Any]:
+        barrier.wait()
+        return pipeline.confirm_pending(pending["pending_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: confirm_at_once(), range(2)))
+
+    assert [result["status"] for result in results] == [
+        "confirmation_required",
+        "confirmation_required",
+    ]
+    resumed_pending_ids = {result["pending_id"] for result in results}
+    assert len(resumed_pending_ids) == 1
+    with closing(database.get_connection()) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, interaction_state, resumed_pending_id
+            FROM pending_entries
+            ORDER BY id
+            """
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == pending["pending_id"]
+    assert rows[0][1] == "customer_created"
+    assert rows[0][2] in resumed_pending_ids
+    assert rows[1][0] in resumed_pending_ids
+    assert len(ledger.list_customers()) == 1
+    assert _transaction_count() == 0
+    assert ledger.get_customer_ledger(results[0]["customer"]["customer_id"]) == []
+
+
+def test_declining_customer_creation_cancels_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+
+    cancelled = pipeline.cancel_pending(pending["pending_id"])
+
+    assert cancelled["status"] == "cancelled"
+    assert ledger.list_customers() == []
+    assert _transaction_count() == 0
+    assert pipeline.confirm_pending(pending["pending_id"])["status"] == "cancelled"
+
+
+def test_cancellation_racing_customer_creation_leaves_consistent_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+    barrier = Barrier(2)
+
+    def confirm_at_once() -> dict[str, Any]:
+        barrier.wait()
+        return pipeline.confirm_pending(pending["pending_id"])
+
+    def cancel_at_once() -> dict[str, Any]:
+        barrier.wait()
+        return pipeline.cancel_pending(pending["pending_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        confirmation_future = executor.submit(confirm_at_once)
+        cancellation_future = executor.submit(cancel_at_once)
+        confirmation = confirmation_future.result()
+        cancellation = cancellation_future.result()
+
+    assert cancellation["status"] == "cancelled"
+    assert confirmation["status"] in {
+        "cancelled",
+        "confirmation_required",
+    }
+    with closing(database.get_connection()) as connection:
+        pending_rows = connection.execute(
+            """
+            SELECT id, interaction_state, resumed_pending_id, cancelled_at
+            FROM pending_entries
+            ORDER BY id
+            """
+        ).fetchall()
+        customer_ids = [
+            row[0] for row in connection.execute("SELECT id FROM customers")
+        ]
+
+    assert _transaction_count() == 0
+    assert len(customer_ids) in {0, 1}
+    assert pending_rows[0][0] == pending["pending_id"]
+    assert pending_rows[0][3] is not None
+    if not customer_ids:
+        assert len(pending_rows) == 1
+        assert pending_rows[0][1] == "customer_creation_confirmation"
+        assert pending_rows[0][2] is None
+    else:
+        assert len(pending_rows) == 2
+        assert pending_rows[0][1] == "customer_created"
+        assert pending_rows[0][2] == pending_rows[1][0]
+        assert pending_rows[1][3] is not None
+        assert pending_rows[1][1] == "transaction_confirmation"
+        assert ledger.get_customer_ledger(customer_ids[0]) == []
+
+
+def test_customer_created_concurrently_is_reused_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+    existing_id = ledger.add_customer("Ramu")
+
+    resumed = pipeline.confirm_pending(pending["pending_id"])
+
+    assert resumed["status"] == "confirmation_required"
+    assert resumed["customer_created"] is False
+    assert resumed["customer"]["customer_id"] == existing_id
+    assert len(ledger.list_customers()) == 1
+    assert ledger.get_customer_ledger(existing_id) == []
+    assert _transaction_count() == 0
+
+
+def test_expired_customer_creation_request_is_not_resumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+    with closing(database.get_connection()) as connection, connection:
+        connection.execute(
+            """
+            UPDATE pending_entries
+            SET created_at = datetime('now', '-6 minutes')
+            WHERE id = ?
+            """,
+            (pending["pending_id"],),
+        )
+
+    result = pipeline.confirm_pending(pending["pending_id"])
+
+    assert result["status"] == "expired"
+    assert ledger.list_customers() == []
+    assert _transaction_count() == 0
+
+
+def test_concurrent_customer_creation_requests_do_not_duplicate_customer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    first = pipeline.handle_text("Ramu owes 500")
+    second = pipeline.handle_text("Ramu owes 500")
+    barrier = Barrier(2)
+
+    def confirm_at_once(pending_id: int) -> dict[str, Any]:
+        barrier.wait()
+        return pipeline.confirm_pending(pending_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                confirm_at_once,
+                (first["pending_id"], second["pending_id"]),
+            )
+        )
+
+    assert [result["status"] for result in results] == [
+        "confirmation_required",
+        "confirmation_required",
+    ]
+    assert len(ledger.list_customers()) == 1
+    assert _transaction_count() == 0
+
+
+def test_customer_creation_and_resumed_pending_failure_rolls_back_completely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending = pipeline.handle_text("Ramu owes 500")
+    insert_pending_entry = pipeline._insert_pending_entry
+
+    def insert_then_fail(*args: Any, **kwargs: Any) -> int:
+        insert_pending_entry(*args, **kwargs)
+        raise sqlite3.IntegrityError("injected resumed-pending failure")
+
+    monkeypatch.setattr(pipeline, "_insert_pending_entry", insert_then_fail)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        pipeline.confirm_pending(pending["pending_id"])
+
+    assert ledger.list_customers() == []
+    assert _pending_count() == 1
+    assert _transaction_count() == 0
+    with closing(database.get_connection()) as connection:
+        row = connection.execute(
+            """
+            SELECT customer_id, interaction_state, resumed_pending_id,
+                   cancelled_at, status
+            FROM pending_entries
+            WHERE id = ?
+            """,
+            (pending["pending_id"],),
+        ).fetchone()
+    assert row == (
+        None,
+        "customer_creation_confirmation",
+        None,
+        None,
+        "pending",
+    )
+
+
+def test_existing_resolution_rules_are_used_before_creating_customer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Suresh"))
+    pending = pipeline.handle_text("Suresh owes 500")
+    ledger.add_customer("Suresh Kumar")
+    ledger.add_customer("Suresh Reddy")
+
+    result = pipeline.confirm_pending(pending["pending_id"])
+
+    assert result["status"] == "clarification_required"
+    assert [match["customer_name"] for match in result["matches"]] == [
+        "Suresh Kumar",
+        "Suresh Reddy",
+    ]
+    assert len(ledger.list_customers()) == 2
+    assert _transaction_count() == 0
 
 
 def test_balance_query_is_read_only(
@@ -225,6 +501,64 @@ def test_expired_pending_entry_is_rejected(
     assert confirmation["status"] == "expired"
     assert ledger.get_customer_ledger(customer_id) == []
     assert _transaction_count() == 0
+
+
+def test_pending_expiration_boundary_is_inclusive_at_five_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_extraction(monkeypatch, _extraction(customer_name="Ramu"))
+    pending_ids = [
+        pipeline.handle_text("Ramu owes 500")["pending_id"]
+        for _ in range(3)
+    ]
+    fixed_now = datetime.now(timezone.utc).replace(microsecond=0)
+    created_at_values = (
+        fixed_now - timedelta(minutes=5) + timedelta(seconds=1),
+        fixed_now - timedelta(minutes=5),
+        fixed_now - timedelta(minutes=5, seconds=1),
+    )
+    with closing(database.get_connection()) as connection, connection:
+        connection.executemany(
+            "UPDATE pending_entries SET created_at = ? WHERE id = ?",
+            [
+                (created_at.strftime("%Y-%m-%d %H:%M:%S"), pending_id)
+                for pending_id, created_at in zip(
+                    pending_ids,
+                    created_at_values,
+                    strict=True,
+                )
+            ],
+        )
+
+    get_connection = pipeline.get_connection
+
+    def connection_with_fixed_clock() -> sqlite3.Connection:
+        connection = get_connection()
+
+        def fixed_datetime(value: str, *modifiers: str) -> str:
+            current = (
+                fixed_now
+                if value == "now"
+                else datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+            )
+            for modifier in modifiers:
+                amount, unit = modifier.split()
+                delta = timedelta(**{unit: int(amount)})
+                current += delta
+            return current.strftime("%Y-%m-%d %H:%M:%S")
+
+        connection.create_function("datetime", -1, fixed_datetime)
+        return connection
+
+    monkeypatch.setattr(pipeline, "get_connection", connection_with_fixed_clock)
+
+    before_expiry = pipeline.get_pending_entry(pending_ids[0])
+    exactly_at_expiry = pipeline.get_pending_entry(pending_ids[1])
+    after_expiry = pipeline.get_pending_entry(pending_ids[2])
+
+    assert before_expiry["status"] == "pending"
+    assert exactly_at_expiry["status"] == "expired"
+    assert after_expiry["status"] == "expired"
 
 
 def test_pending_entry_cannot_be_confirmed_twice(
@@ -493,4 +827,6 @@ def test_init_db_migrates_legacy_pending_description(
         "extraction_json",
         "candidate_customer_ids_json",
         "cancelled_at",
+        "interaction_state",
+        "resumed_pending_id",
     } <= columns

@@ -2,14 +2,14 @@ import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
 from . import extractor, ledger
 from .database import get_connection
 from .models import CustomerResolution, TransactionExtraction
-from .resolver import resolve_customer
+from .resolver import resolve_customer, resolve_customer_on_connection
 
 
 _PENDING_ENTRY_TTL = timedelta(minutes=5)
@@ -66,7 +66,8 @@ def _pending_row(
         """
         SELECT id, customer_id, transaction_type, amount, description,
                created_at, status, extraction_json,
-               candidate_customer_ids_json, cancelled_at
+               candidate_customer_ids_json, cancelled_at,
+               interaction_state, resumed_pending_id
         FROM pending_entries
         WHERE id = ?
         """,
@@ -89,6 +90,8 @@ def _entry_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "extraction": _serialize_extraction(extraction),
         "candidate_customer_ids": candidate_customer_ids,
         "expires_at": _expiration(row[5]).isoformat(),
+        "interaction_state": row[10],
+        "resumed_pending_id": row[11],
     }
 
 
@@ -96,14 +99,8 @@ def _create_pending_entry(
     extraction: TransactionExtraction,
     customer_id: int | None,
     candidate_customer_ids: list[int] | None = None,
+    interaction_state: str = "transaction_confirmation",
 ) -> tuple[int, str]:
-    transaction_type = {
-        "add_credit": "credit",
-        "add_payment": "payment",
-    }.get(extraction.intent)
-    if transaction_type is None:
-        raise ValueError("pending entries require a transaction intent")
-
     created_at = datetime.now(timezone.utc).replace(microsecond=0)
     expires_at = created_at + _PENDING_ENTRY_TTL
     candidates = candidate_customer_ids or (
@@ -120,26 +117,54 @@ def _create_pending_entry(
               AND datetime(created_at) <= datetime('now', '-5 minutes')
             """
         )
-        cursor = connection.execute(
-            """
-            INSERT INTO pending_entries (
-                customer_id, transaction_type, amount, description,
-                created_at, extraction_json, candidate_customer_ids_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                customer_id,
-                transaction_type,
-                None if extraction.amount_ambiguous else extraction.amount,
-                extraction.description,
-                created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                json.dumps(_serialize_extraction(extraction), ensure_ascii=False),
-                json.dumps(candidates),
-            ),
+        pending_id = _insert_pending_entry(
+            connection,
+            extraction,
+            customer_id,
+            candidates,
+            created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            interaction_state,
         )
 
-    return int(cursor.lastrowid), expires_at.isoformat()
+    return pending_id, expires_at.isoformat()
+
+
+def _insert_pending_entry(
+    connection: sqlite3.Connection,
+    extraction: TransactionExtraction,
+    customer_id: int | None,
+    candidate_customer_ids: list[int],
+    created_at: str,
+    interaction_state: str = "transaction_confirmation",
+) -> int:
+    transaction_type = {
+        "add_credit": "credit",
+        "add_payment": "payment",
+    }.get(extraction.intent)
+    if transaction_type is None:
+        raise ValueError("pending entries require a transaction intent")
+
+    cursor = connection.execute(
+        """
+        INSERT INTO pending_entries (
+            customer_id, transaction_type, amount, description,
+            created_at, extraction_json, candidate_customer_ids_json,
+            interaction_state
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            customer_id,
+            transaction_type,
+            None if extraction.amount_ambiguous else extraction.amount,
+            extraction.description,
+            created_at,
+            json.dumps(_serialize_extraction(extraction), ensure_ascii=False),
+            json.dumps(candidate_customer_ids),
+            interaction_state,
+        ),
+    )
+    return int(cursor.lastrowid)
 
 
 def _transaction_details(
@@ -169,20 +194,71 @@ def _customer_not_found(
     *,
     invite_to_add: bool = True,
 ) -> dict[str, Any]:
-    question = f"I couldn't find {extraction.customer_name}."
+    customer_name = extraction.customer_name or ""
+    question = f"I couldn't find {customer_name}."
     if invite_to_add:
-        question += " Would you like to add this customer?"
+        question = (
+            f"{customer_name} అనే కస్టమర్ లేరు. "
+            "కొత్త కస్టమర్‌గా సృష్టించాలా?"
+        )
     result: dict[str, Any] = {
-        "status": "customer_not_found",
+        "status": (
+            "customer_creation_confirmation" if invite_to_add else "customer_not_found"
+        ),
         "intent": extraction.intent,
-        "customer_name": extraction.customer_name,
+        "customer_name": customer_name,
         "question": question,
     }
+    if invite_to_add:
+        result["question_en"] = (
+            f"Customer {customer_name} does not exist. "
+            "Would you like to create this customer?"
+        )
     if pending_id is not None:
         result["pending_id"] = pending_id
         result["expires_at"] = expires_at
         result["transaction"] = _transaction_details(extraction)
+        result["interaction_state"] = "customer_creation_confirmation"
     return result
+
+
+def _transaction_confirmation_result(
+    connection: sqlite3.Connection,
+    pending_row: tuple[Any, ...],
+) -> dict[str, Any]:
+    extraction = TransactionExtraction.model_validate_json(pending_row[7])
+    customer_row = connection.execute(
+        "SELECT id, name FROM customers WHERE id = ?",
+        (pending_row[1],),
+    ).fetchone()
+    if customer_row is None:
+        raise ValueError(f"Unknown customer ID: {pending_row[1]}")
+    return {
+        "status": "confirmation_required",
+        "intent": extraction.intent,
+        "pending_id": int(pending_row[0]),
+        "expires_at": _expiration(pending_row[5]).isoformat(),
+        "customer": {
+            "customer_id": int(customer_row[0]),
+            "customer_name": customer_row[1],
+        },
+        "transaction": _transaction_details(extraction),
+        "interaction_state": "transaction_confirmation",
+    }
+
+
+def _resumed_confirmation_result(
+    connection: sqlite3.Connection,
+    pending_id: int,
+) -> dict[str, Any]:
+    row = _pending_row(connection, pending_id)
+    if row is None:
+        return {"status": "not_found", "pending_id": pending_id}
+    if row[9] is not None:
+        return _unavailable_result(pending_id, "cancelled", row[5])
+    if row[6] != "pending":
+        return _unavailable_result(pending_id, row[6], row[5])
+    return _transaction_confirmation_result(connection, row)
 
 
 def get_pending_entry(pending_id: int) -> dict[str, Any]:
@@ -226,7 +302,7 @@ def select_pending_customer(
         cursor = connection.execute(
             """
             UPDATE pending_entries
-            SET customer_id = ?
+            SET customer_id = ?, interaction_state = 'transaction_confirmation'
             WHERE id = ?
               AND status = 'pending'
               AND datetime(created_at) > datetime('now', '-5 minutes')
@@ -244,7 +320,6 @@ def select_pending_customer(
     if customer_row is None:
         raise ValueError(f"Unknown customer ID: {customer_id}")
 
-    entry["customer_id"] = customer_id
     extraction = TransactionExtraction.model_validate(entry["extraction"])
     return {
         "status": "confirmation_required",
@@ -256,6 +331,7 @@ def select_pending_customer(
             "customer_name": customer_row[1],
         },
         "transaction": _transaction_details(extraction),
+        "interaction_state": "transaction_confirmation",
     }
 
 
@@ -267,38 +343,116 @@ def confirm_pending(pending_id: int) -> dict[str, Any]:
         with closing(get_connection()) as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    """
-                    UPDATE pending_entries
-                    SET status = 'expired'
-                    WHERE id = ?
-                      AND status = 'pending'
-                      AND cancelled_at IS NULL
-                      AND datetime(created_at) <= datetime('now', '-5 minutes')
-                    """,
-                    (pending_id,),
-                )
-                row = connection.execute(
-                    """
-                    SELECT id, customer_id, transaction_type, amount, description,
-                           created_at, status, extraction_json, cancelled_at
-                    FROM pending_entries
-                    WHERE id = ?
-                    """,
-                    (pending_id,),
-                ).fetchone()
+                row = _pending_row(connection, pending_id)
                 if row is None:
                     connection.rollback()
                     return {"status": "not_found", "pending_id": pending_id}
                 if row[6] == "expired":
                     connection.commit()
                     return _unavailable_result(pending_id, row[6], row[5])
-                if row[8] is not None:
+                if row[9] is not None:
                     connection.rollback()
                     return _unavailable_result(pending_id, "cancelled", row[5])
                 if row[6] != "pending":
                     connection.rollback()
                     return _unavailable_result(pending_id, row[6], row[5])
+                if row[10] == "customer_created":
+                    if row[11] is None:
+                        raise ValueError(
+                            f"Pending entry {pending_id} has no resumed transaction"
+                        )
+                    result = _resumed_confirmation_result(connection, row[11])
+                    connection.commit()
+                    result["customer_creation_pending_id"] = pending_id
+                    return result
+                if row[10] == "customer_creation_confirmation":
+                    extraction = TransactionExtraction.model_validate_json(row[7])
+                    if row[3] is None or extraction.amount_ambiguous:
+                        connection.rollback()
+                        return {
+                            "status": "amount_required",
+                            "pending_id": pending_id,
+                            "expires_at": _expiration(row[5]).isoformat(),
+                        }
+                    customer_name = extraction.customer_name
+                    if not customer_name or not customer_name.strip():
+                        connection.rollback()
+                        return {
+                            "status": "customer_required",
+                            "pending_id": pending_id,
+                            "expires_at": _expiration(row[5]).isoformat(),
+                        }
+
+                    resolution = CustomerResolution.model_validate(
+                        resolve_customer_on_connection(connection, customer_name)
+                    )
+                    if resolution.status == "multiple_matches":
+                        candidates = [
+                            match.customer_id for match in resolution.matches
+                        ]
+                        connection.execute(
+                            """
+                            UPDATE pending_entries
+                            SET candidate_customer_ids_json = ?
+                            WHERE id = ? AND status = 'pending'
+                            """,
+                            (json.dumps(candidates), pending_id),
+                        )
+                        connection.commit()
+                        return {
+                            "status": "clarification_required",
+                            "intent": extraction.intent,
+                            "pending_id": pending_id,
+                            "expires_at": _expiration(row[5]).isoformat(),
+                            "question": "Which customer did you mean?",
+                            "matches": [
+                                match.model_dump(mode="json")
+                                for match in resolution.matches
+                            ],
+                            "transaction": _transaction_details(extraction),
+                        }
+
+                    customer_created = resolution.status == "not_found"
+                    if customer_created:
+                        customer_id = ledger._add_customer_on_connection(
+                            connection,
+                            customer_name,
+                        )
+                    else:
+                        customer_id = resolution.matches[0].customer_id
+
+                    resumed_pending_id = _insert_pending_entry(
+                        connection,
+                        extraction,
+                        customer_id,
+                        [customer_id],
+                        datetime.now(timezone.utc)
+                        .replace(microsecond=0)
+                        .strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE pending_entries
+                        SET customer_id = ?,
+                            interaction_state = 'customer_created',
+                            resumed_pending_id = ?
+                        WHERE id = ? AND status = 'pending'
+                        """,
+                        (customer_id, resumed_pending_id, pending_id),
+                    )
+                    resumed_row = _pending_row(connection, resumed_pending_id)
+                    if resumed_row is None:
+                        raise RuntimeError(
+                            f"Resumed pending entry {resumed_pending_id} disappeared"
+                        )
+                    result = _transaction_confirmation_result(
+                        connection,
+                        resumed_row,
+                    )
+                    result["customer_creation_pending_id"] = pending_id
+                    result["customer_created"] = customer_created
+                    connection.commit()
+                    return result
                 if row[1] is None:
                     connection.rollback()
                     return {
@@ -435,6 +589,35 @@ def cancel_pending(pending_id: int) -> dict[str, Any]:
                     connection.rollback()
                     return _unavailable_result(pending_id, row[6], row[5])
 
+                if row[10] == "customer_created" and row[11] is not None:
+                    resumed_row = _pending_row(connection, row[11])
+                    if resumed_row is None:
+                        connection.rollback()
+                        return {"status": "not_found", "pending_id": row[11]}
+                    if resumed_row[9] is not None:
+                        connection.rollback()
+                        return _unavailable_result(
+                            row[11],
+                            "cancelled",
+                            resumed_row[5],
+                        )
+                    if resumed_row[6] != "pending":
+                        connection.rollback()
+                        return _unavailable_result(
+                            row[11],
+                            resumed_row[6],
+                            resumed_row[5],
+                        )
+                    connection.execute(
+                        """
+                        UPDATE pending_entries
+                        SET cancelled_at = datetime('now')
+                        WHERE id = ? AND status = 'pending'
+                          AND cancelled_at IS NULL
+                        """,
+                        (row[11],),
+                    )
+
                 cursor = connection.execute(
                     """
                     UPDATE pending_entries
@@ -479,7 +662,11 @@ def cancel_pending(pending_id: int) -> dict[str, Any]:
     }
 
 
-def handle_text(text: str) -> dict[str, Any]:
+def handle_text(
+    text: str,
+    *,
+    extraction_observer: Callable[[TransactionExtraction], None] | None = None,
+) -> dict[str, Any]:
     if not text.strip():
         return {
             "status": "invalid_input",
@@ -495,6 +682,9 @@ def handle_text(text: str) -> dict[str, Any]:
             "intent": "unknown",
             "question": "I couldn't understand that. Please try again.",
         }
+
+    if extraction_observer is not None:
+        extraction_observer(extraction)
 
     if extraction.intent == "daily_summary":
         return {
@@ -559,10 +749,21 @@ def handle_text(text: str) -> dict[str, Any]:
         and customer_resolution.status == "multiple_matches"
         else ([customer_id] if customer_id is not None else [])
     )
+    customer_creation_confirmation = (
+        customer_resolution is not None
+        and customer_resolution.status == "not_found"
+        and extraction.amount is not None
+        and not extraction.amount_ambiguous
+    )
     pending_id, expires_at = _create_pending_entry(
         extraction,
         customer_id,
         candidate_customer_ids,
+        (
+            "customer_creation_confirmation"
+            if customer_creation_confirmation
+            else "transaction_confirmation"
+        ),
     )
     details = _transaction_details(extraction)
 
