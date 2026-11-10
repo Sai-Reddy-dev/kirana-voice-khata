@@ -14,6 +14,85 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         yield test_client
 
 
+def test_demo_auth_protects_application_routes_but_not_health(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEMO_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("DEMO_USERNAME", "demo-user")
+    monkeypatch.setenv("DEMO_PASSWORD", "demo-pass")
+
+    health = client.get("/health")
+    unauthenticated = client.get("/")
+    authenticated = client.get("/", auth=("demo-user", "demo-pass"))
+
+    assert health.status_code == 200
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.headers["www-authenticate"].startswith("Basic ")
+    assert authenticated.status_code == 200
+
+
+def test_demo_auth_fails_closed_when_credentials_are_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEMO_AUTH_REQUIRED", "true")
+
+    response = client.get("/api/customers")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Demo access is not configured"}
+
+
+def test_demo_auth_is_disabled_by_default_locally(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("DEMO_AUTH_REQUIRED", raising=False)
+
+    response = client.get("/api/customers")
+
+    assert response.status_code == 200
+
+
+def test_render_environment_requires_auth_by_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("DEMO_AUTH_REQUIRED", raising=False)
+    monkeypatch.setenv("DEMO_USERNAME", "demo-user")
+    monkeypatch.setenv("DEMO_PASSWORD", "demo-pass")
+
+    response = client.get("/api/customers")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Basic ")
+
+
+def test_render_environment_ignores_explicit_auth_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("DEMO_AUTH_REQUIRED", "false")
+    monkeypatch.setenv("DEMO_USERNAME", "demo-user")
+    monkeypatch.setenv("DEMO_PASSWORD", "demo-pass")
+
+    response = client.get("/api/customers")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Basic ")
+
+
+def test_demo_auth_rejects_invalid_credentials(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEMO_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("DEMO_USERNAME", "demo-user")
+    monkeypatch.setenv("DEMO_PASSWORD", "demo-pass")
+
+    response = client.get("/api/customers", auth=("demo-user", "wrong-pass"))
+
+    assert response.status_code == 401
+
+
 def test_root_serves_production_frontend_entry_point(
     client: TestClient,
     tmp_path: Path,

@@ -10,6 +10,7 @@ import {
   isUndoSuccessful,
   ledgerEntryClass,
   postConfirm,
+  postCancel,
   postUndo,
   postText,
   postVoice,
@@ -67,7 +68,9 @@ test("adapts a voice envelope with nested transaction result", async () => {
 
 test("uploads voice with audio_file and keeps its MIME type and filename", async () => {
   let requestOptions;
-  globalThis.fetch = async (_url, options) => {
+  let requestUrl;
+  globalThis.fetch = async (url, options) => {
+    requestUrl = url;
     requestOptions = options;
     return jsonResponse({ result: { status: "unclear" }, transcript: "" });
   };
@@ -76,6 +79,9 @@ test("uploads voice with audio_file and keeps its MIME type and filename", async
   await postVoice(audio, { pendingId: "12", language: "te-IN" });
 
   const form = requestOptions.body;
+  assert.equal(requestUrl, "/api/voice");
+  assert.equal(requestOptions.credentials, undefined);
+  assert.equal(requestOptions.headers["Content-Type"], undefined);
   assert.equal(form.get("audio_file").type, "audio/ogg");
   assert.equal(form.get("audio_file").name, "voice.ogg");
   assert.equal(form.get("pending_id"), "12");
@@ -86,6 +92,8 @@ test("uploads voice with audio_file and keeps its MIME type and filename", async
 test("maps text confirmation_required and nested fields", async () => {
   globalThis.fetch = async (_url, options) => {
     assert.deepEqual(JSON.parse(options.body), { text: "రాము దగ్గర 500 అప్పు" });
+    assert.equal(options.credentials, undefined);
+    assert.equal(options.headers["Content-Type"], "application/json");
     return jsonResponse({
       status: "confirmation_required",
       pending_id: 27,
@@ -135,6 +143,53 @@ test("keeps the new transaction pending ID after customer creation", async () =>
   assert.equal(result.state, "transaction_confirmation");
   assert.equal(result.pendingId, "32");
   assert.equal(result.customerName, "రాము");
+});
+
+test("cancellation uses the shared same-origin API request", async () => {
+  let requestUrl;
+  let requestOptions;
+  globalThis.fetch = async (url, options) => {
+    requestUrl = url;
+    requestOptions = options;
+    return jsonResponse({ status: "cancelled", pending_id: 31 });
+  };
+
+  const result = await postCancel("31");
+
+  assert.equal(requestUrl, "/api/cancel/31");
+  assert.equal(requestOptions.credentials, undefined);
+  assert.equal(requestOptions.body, undefined);
+  assert.equal(result.status, "cancelled");
+});
+
+test("preserves HTTP Basic 401 responses for multipart and JSON API requests", async () => {
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return jsonResponse({ detail: "Authentication required" }, 401);
+  };
+
+  await assert.rejects(
+    postVoice(new Blob(["audio"], { type: "audio/wav" })),
+    (error) => {
+      assert.equal(error.status, 401);
+      assert.equal(error.detail, "Authentication required");
+      assert.equal(error.normalizedResponse.state, "error");
+      return true;
+    },
+  );
+  await assert.rejects(postText("hello"), (error) => {
+    assert.equal(error.status, 401);
+    assert.equal(error.detail, "Authentication required");
+    return true;
+  });
+
+  assert.equal(requests[0].url, "/api/voice");
+  assert.ok(requests[0].options.body instanceof FormData);
+  assert.equal(requests[0].options.credentials, undefined);
+  assert.equal(requests[1].url, "/api/text");
+  assert.equal(requests[1].options.headers["Content-Type"], "application/json");
+  assert.equal(requests[1].options.credentials, undefined);
 });
 
 test("decodes backend base64 WAV using the returned MIME type", async () => {

@@ -1,10 +1,13 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+import base64
+import hmac
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .database import init_db
 from .routes import router
@@ -21,6 +24,62 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Kirana Voice Khata", lifespan=lifespan)
 app.include_router(router)
+
+
+@app.middleware("http")
+async def demo_access(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    running_on_render = os.getenv("RENDER", "").strip().lower() == "true"
+    auth_configured = os.getenv("DEMO_AUTH_REQUIRED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    auth_required = running_on_render or auth_configured
+    if not auth_required:
+        return await call_next(request)
+
+    username = os.getenv("DEMO_USERNAME")
+    password = os.getenv("DEMO_PASSWORD")
+    if not username or not password:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Demo access is not configured"},
+        )
+
+    authorization = request.headers.get("authorization", "")
+    scheme, _, credentials = authorization.partition(" ")
+    if scheme.lower() != "basic" or not credentials:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": 'Basic realm="Kirana Voice Khata Demo"'},
+        )
+
+    try:
+        decoded = base64.b64decode(credentials, validate=True).decode("utf-8")
+        supplied_username, separator, supplied_password = decoded.partition(":")
+    except (ValueError, UnicodeDecodeError):
+        separator = ""
+        supplied_username = ""
+        supplied_password = ""
+
+    username_matches = hmac.compare_digest(
+        supplied_username.encode("utf-8"), username.encode("utf-8")
+    )
+    password_matches = hmac.compare_digest(
+        supplied_password.encode("utf-8"), password.encode("utf-8")
+    )
+    if not separator or not (username_matches and password_matches):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": 'Basic realm="Kirana Voice Khata Demo"'},
+        )
+
+    return await call_next(request)
 
 
 @app.get("/")

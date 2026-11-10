@@ -1,15 +1,21 @@
 from contextlib import closing
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 
-DATABASE_PATH = Path(__file__).resolve().parent.parent / "data" / "kirana.db"
+DEFAULT_DATABASE_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "kirana.db"
+)
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH") or DEFAULT_DATABASE_PATH)
 
 
 def get_connection() -> sqlite3.Connection:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH)
+    configured_path = os.getenv("DATABASE_PATH")
+    database_path = Path(configured_path) if configured_path else DATABASE_PATH
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 

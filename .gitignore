@@ -28,3 +28,11 @@ tts_test*.pcm
 
 # Local voice request logs
 data/voice_requests.jsonl
+
+# Local databases, recordings, and generated audio
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.wav
+*.pcm

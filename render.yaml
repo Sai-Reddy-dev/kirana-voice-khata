@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: kirana-voice-khata-demo
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: kirana-demo-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/kirana.db
+      - key: DEMO_AUTH_REQUIRED
+        value: "true"
+      - key: DEMO_USERNAME
+        sync: false
+      - key: DEMO_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PRISMA_API_KEY
+        sync: false
+      - key: TIMBRE_API_KEY
+        sync: false
