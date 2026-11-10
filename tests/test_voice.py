@@ -1,6 +1,7 @@
 import base64
 import json
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ def _mock_extraction(
     monkeypatch.setattr(
         pipeline.extractor,
         "extract_transaction",
-        lambda _: extraction,
+        lambda _, **kwargs: extraction,
     )
 
 
@@ -118,10 +119,52 @@ def test_voice_transaction_flow_returns_transcript_card_audio_and_log(
 
     log_contents = log_path.read_text(encoding="utf-8")
     log_record = json.loads(log_contents)
-    assert log_record["transcript"] == "Asha bought rice"
-    assert log_record["extracted_json"] == _extraction().model_dump(mode="json")
+    assert log_record["request_id"]
+    assert "request_id" not in body
+    assert "transcript" not in log_record
+    assert "extracted_json" not in log_record
     assert log_record["processing_duration_ms"] == body["timings_ms"]["total"]
     assert "raw audio" not in log_contents
+    assert "Asha" not in log_contents
+
+
+def test_voice_propagates_request_id_and_separates_stt_timing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    customer_id = ledger.add_customer("Asha")
+    seen_request_ids: list[str | None] = []
+    log_path = tmp_path / "voice_requests.jsonl"
+    monkeypatch.setattr(routes, "VOICE_LOG_PATH", log_path)
+
+    def transcribe(audio_bytes: bytes, mime_type: str) -> str:
+        time.sleep(0.02)
+        return "Asha bought rice"
+
+    def extract(
+        text: str,
+        *,
+        request_id: str | None = None,
+    ) -> TransactionExtraction:
+        seen_request_ids.append(request_id)
+        time.sleep(0.03)
+        return _extraction()
+
+    monkeypatch.setattr(routes.stt, "transcribe", transcribe)
+    monkeypatch.setattr(pipeline.extractor, "extract_transaction", extract)
+    monkeypatch.setattr(routes.tts, "speak", lambda *args: b"tts wav")
+
+    response = _voice_request(client)
+
+    assert response.status_code == 200
+    timings = response.json()["timings_ms"]
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+    assert seen_request_ids == [record["request_id"]]
+    assert timings["stt"] < timings["pipeline"]
+    assert timings["stt"] < 100
+    assert timings["pipeline"] >= 25
+    assert ledger.get_customer_ledger(customer_id) == []
 
 
 def test_voice_returns_multiple_match_card_without_resolving_customer(
@@ -380,11 +423,7 @@ def test_voice_read_only_balance_skips_tts(
     assert response.json()["audio"] is None
     assert response.json()["timings_ms"]["tts"] is None
     log_record = json.loads(log_path.read_text(encoding="utf-8"))
-    assert log_record["extracted_json"] == _extraction(
-        intent="check_balance",
-        amount=None,
-        items=[],
-    ).model_dump(mode="json")
+    assert "extracted_json" not in log_record
 
 
 def test_tts_failure_does_not_hide_transcript_or_pending_card(

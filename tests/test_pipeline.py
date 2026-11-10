@@ -93,6 +93,32 @@ def test_clear_customer_match_returns_confirmation_card_and_pending_entry(
     assert 299 <= (expiration - created_at).total_seconds() <= 301
 
 
+def test_telugu_credit_shorthand_creates_pending_without_ledger_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    customer_id = ledger.add_customer("రాము")
+    _mock_extraction(
+        monkeypatch,
+        _extraction(
+            customer_name="రాము",
+            amount=500,
+            description=None,
+        ),
+    )
+
+    result = pipeline.handle_text("రాము ఐదు వందల రూపాయలు బాకీ.")
+
+    assert result["status"] == "confirmation_required"
+    assert result["intent"] == "add_credit"
+    assert result["customer"]["customer_id"] == customer_id
+    assert result["transaction"]["transaction_type"] == "credit"
+    assert result["transaction"]["amount"] == 500
+    assert result["pending_id"]
+    assert ledger.get_customer_ledger(customer_id) == []
+    assert _pending_count() == 1
+    assert _transaction_count() == 0
+
+
 def test_multiple_customer_matches_require_clarification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="te">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#1B5E20" />
+    <meta name="description" content="కిరాణా వాయిస్ ఖాతా — వాయిస్ ఆధారిత లెడ్జర్" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+
+    <!-- Telugu-capable font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+Telugu:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <title>కిరాణా వాయిస్ ఖాతా — Kirana Voice Khata</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <meta property="og:image" content="https://bolt.new/static/og_default.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://bolt.new/static/og_default.png">
+  </head>
+  <body data-state="idle">
+    <!-- ================= MAIN VIEW ================= -->
+    <div id="main-view" class="view show">
+      <!-- A. Header -->
+      <header class="app-header">
+        <div class="header-titles">
+          <h1 class="app-name">కిరాణా వాయిస్ ఖాతా</h1>
+          <p class="app-subtitle">Kirana Voice Khata</p>
+        </div>
+        <div class="header-right">
+          <p id="date-label" class="date-label"></p>
+          <div class="status-indicator">
+            <span id="status-dot" class="status-dot online"></span>
+            <span id="status-text" class="status-text">ఆన్‌లైన్</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- B. Today's summary -->
+      <section class="summary-section" aria-label="Today summary">
+        <div class="summary-card summary-credit">
+          <p class="summary-te">ఈరోజు ఇచ్చిన అప్పు</p>
+          <p class="summary-en">Credit given today</p>
+          <p id="credit-today" class="summary-value">₹0</p>
+        </div>
+        <div class="summary-card summary-payment">
+          <p class="summary-te">ఈరోజు వచ్చిన చెల్లింపులు</p>
+          <p class="summary-en">Payments received today</p>
+          <p id="payments-today" class="summary-value">₹0</p>
+        </div>
+        <div class="summary-card summary-count">
+          <p class="summary-te">ఈరోజు లావాదేవీలు</p>
+          <p class="summary-en">Today's transactions</p>
+          <p id="transaction-count" class="summary-value">—</p>
+        </div>
+        <p id="summary-error" class="inline-error">
+          సారాంశం తీసుకోలేకపోయింది · Could not load today's summary
+        </p>
+      </section>
+
+      <!-- C. Voice recording area -->
+      <section class="voice-section" aria-label="Voice recording">
+        <div class="mic-wrap">
+          <button
+            id="mic-button"
+            class="mic-button"
+            type="button"
+            aria-label="మాట్లాడండి — Speak"
+          >
+            <span id="mic-icon" class="mic-icon" aria-hidden="true">
+              <!-- Microphone SVG -->
+              <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor">
+                <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z" />
+                <path d="M17 11a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+              </svg>
+            </span>
+            <span id="mic-label" class="mic-label">మాట్లాడండి</span>
+            <span id="mic-label-en" class="mic-label-en">Speak</span>
+          </button>
+          <span id="record-timer" class="record-timer">00:00</span>
+        </div>
+        <p id="voice-hint" class="voice-hint">మాట్లాడటానికి ట్యాప్ చేయండి</p>
+
+        <!-- Transcript display -->
+        <div id="transcript-box" class="transcript-box">
+          <p class="transcript-label">మీరు చెప్పింది</p>
+          <p id="transcript-text" class="transcript-text"></p>
+        </div>
+      </section>
+
+      <!-- D & E. Confirmation card (transaction + customer creation) -->
+      <section id="confirm-card" class="confirm-card" aria-live="polite">
+        <h2 id="confirm-title" class="confirm-title"></h2>
+        <p id="confirm-title-en" class="confirm-title-en"></p>
+        <div id="confirm-body" class="confirm-body"></div>
+        <div class="confirm-buttons">
+          <button
+            id="btn-confirm"
+            class="btn btn-confirm"
+            type="button"
+          >
+            <span class="btn-tick">✓</span> అవును
+            <span class="btn-en">Confirm</span>
+          </button>
+          <button
+            id="btn-cancel"
+            class="btn btn-cancel"
+            type="button"
+          >
+            <span class="btn-cross">✕</span> వద్దు
+            <span class="btn-en">Cancel</span>
+          </button>
+        </div>
+        <div id="confirm-spinner" class="spinner-inline">
+          <span class="spinner"></span>
+          <span class="spinner-text">నిర్ధారిస్తున్నాను...</span>
+        </div>
+      </section>
+
+      <!-- H. Manual text input -->
+      <section class="text-input-section" aria-label="Manual text input">
+        <details class="text-input-collapse">
+          <summary class="text-input-toggle">
+            <span>టైప్ చేయండి</span>
+            <span class="text-input-toggle-en">Type instead</span>
+          </summary>
+          <div class="text-input-row">
+            <input
+              id="text-input"
+              class="text-input"
+              type="text"
+              placeholder="ఉదా: రాము దగ్గర 500 రూపాయలు అప్పు ఇచ్చాను"
+              autocomplete="off"
+            />
+            <button id="btn-send-text" class="btn btn-send" type="button">
+              పంపండి
+              <span class="btn-en">Send</span>
+            </button>
+          </div>
+          <div id="send-spinner" class="spinner-inline">
+            <span class="spinner"></span>
+            <span class="spinner-text">పంపుతున్నాను...</span>
+          </div>
+        </details>
+      </section>
+
+      <!-- F. Customer list -->
+      <section class="customers-section" aria-label="Customers">
+        <div class="section-header">
+          <h2 class="section-title">కస్టమర్‌లు</h2>
+          <span id="customers-count" class="section-count">0</span>
+        </div>
+        <input
+          id="customer-search"
+          class="customer-search"
+          type="text"
+          placeholder="కస్టమర్ వెతకండి..."
+          autocomplete="off"
+        />
+        <div id="customer-list" class="customer-list"></div>
+        <p id="customers-error" class="inline-error">
+          కస్టమర్‌లు తీసుకోలేకపోయింది · Could not load customers
+        </p>
+      </section>
+
+      <!-- I. Undo -->
+      <section class="undo-section">
+        <button id="btn-undo" class="btn btn-undo" type="button">
+          ↺ అన్డూ <span class="btn-en">Undo last</span>
+        </button>
+        <p id="undo-hint" class="undo-hint"></p>
+      </section>
+    </div>
+
+    <!-- ================= LEDGER VIEW ================= -->
+    <div id="ledger-view" class="view">
+      <header class="ledger-header">
+        <button id="btn-back" class="btn-back" type="button" aria-label="వెనక్కి — Back">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+            <path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12Z" />
+          </svg>
+          <span>వెనక్కి</span>
+        </button>
+        <h2 id="ledger-name" class="ledger-name"></h2>
+      </header>
+      <div class="ledger-balance-box">
+        <p class="ledger-balance-label">ప్రస్తుత బాకీ · Current Balance</p>
+        <p id="ledger-balance" class="ledger-balance-value">₹0</p>
+      </div>
+      <div id="ledger-list" class="ledger-list"></div>
+      <p id="ledger-error" class="inline-error">
+        లెడ్జర్ తీసుకోలేకపోయింది · Could not load ledger
+      </p>
+    </div>
+
+    <!-- ================= TOAST ================= -->
+    <div id="toast" class="toast" role="alert" aria-live="assertive">
+      <span id="toast-icon" class="toast-icon"></span>
+      <div class="toast-body">
+        <p id="toast-title" class="toast-title"></p>
+        <p id="toast-en" class="toast-en"></p>
+      </div>
+    </div>
+
+    <!-- ================= MODAL (undo confirm) ================= -->
+    <div id="modal" class="modal-overlay" role="dialog" aria-modal="true">
+      <div class="modal">
+        <h3 id="modal-title" class="modal-title"></h3>
+        <p id="modal-title-en" class="modal-title-en"></p>
+        <div class="modal-buttons">
+          <button id="modal-yes" class="btn btn-confirm" type="button">
+            అవును <span class="btn-en">Yes</span>
+          </button>
+          <button id="modal-no" class="btn btn-cancel" type="button">
+            వద్దు <span class="btn-en">No</span>
+          </button>
+        </div>
+        <div id="modal-spinner" class="spinner-inline">
+          <span class="spinner"></span>
+          <span class="spinner-text">రద్దు చేస్తున్నాను...</span>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

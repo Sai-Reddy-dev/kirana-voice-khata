@@ -78,6 +78,25 @@ Use add_payment only when the customer explicitly indicates that money was paid,
 
 If the transaction type is unclear, use intent="unknown".
 
+Kirana ledger shorthand: when a customer name and amount are followed by
+"బాకీ" as a statement (not a question), interpret it as a request to record
+that amount as credit, even without an action verb. Do not apply this rule to
+questions about an existing due or to a customer name and amount with no
+transaction indicator.
+
+Examples:
+Utterance: రాము ఐదు వందల రూపాయలు బాకీ.
+Expected: {"intent":"add_credit","customer_name":"రాము","amount":500,"items":[],"confidence":"high","amount_ambiguous":false,"description":null}
+
+Utterance: రాముకు ఎంత బాకీ ఉంది?
+Expected: {"intent":"check_balance","customer_name":"రాము","amount":null,"items":[],"confidence":"high","amount_ambiguous":false,"description":null}
+
+Utterance: రాము ఐదు వందల రూపాయలు చెల్లించాడు
+Expected: {"intent":"add_payment","customer_name":"రాము","amount":500,"items":[],"confidence":"high","amount_ambiguous":false,"description":null}
+
+Utterance: రాము ఐదు వందల రూపాయలు
+Expected: {"intent":"unknown","customer_name":"రాము","amount":500,"items":[],"confidence":"low","amount_ambiguous":false,"description":null}
+
 Example:
 రమేష్ 250 రూపాయలు
 

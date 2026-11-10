@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path as FilePath
 from typing import Any
@@ -303,15 +304,13 @@ def _voice_http_status(result: dict[str, Any], default: int = 200) -> int:
 
 def _write_voice_log(
     *,
-    transcript: str,
-    extracted_json: dict[str, Any] | None,
+    request_id: str,
     timings_ms: dict[str, float | None],
     outcome: str,
 ) -> None:
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "transcript": transcript,
-        "extracted_json": extracted_json,
+        "request_id": request_id,
         "timings_ms": timings_ms,
         "processing_duration_ms": timings_ms["total"],
         "outcome": outcome,
@@ -327,6 +326,7 @@ def submit_voice(
     pending_id: str | None = Form(None),
     language: str = Form("te-IN"),
 ) -> JSONResponse:
+    request_id = uuid.uuid4().hex
     request_started = time.perf_counter()
     timings_ms: dict[str, float | None] = {
         "stt": None,
@@ -335,7 +335,6 @@ def submit_voice(
         "total": None,
     }
     transcript = ""
-    extracted_json: dict[str, Any] | None = None
     result: dict[str, Any]
     response_status = 200
     outcome = "invalid_request"
@@ -382,6 +381,10 @@ def submit_voice(
                     audio_file.content_type or "",
                 )
             except stt.STTInvalidAudioError:
+                timings_ms["stt"] = round(
+                    (time.perf_counter() - stt_started) * 1000,
+                    2,
+                )
                 result = {
                     "status": "transcription_failed",
                     "error": "invalid_audio",
@@ -390,6 +393,10 @@ def submit_voice(
                 response_status = 400
                 outcome = "invalid_audio"
             except stt.STTTimeoutError:
+                timings_ms["stt"] = round(
+                    (time.perf_counter() - stt_started) * 1000,
+                    2,
+                )
                 result = {
                     "status": "transcription_failed",
                     "error": "stt_timeout",
@@ -398,6 +405,10 @@ def submit_voice(
                 response_status = 504
                 outcome = "stt_timeout"
             except stt.STTConfigurationError:
+                timings_ms["stt"] = round(
+                    (time.perf_counter() - stt_started) * 1000,
+                    2,
+                )
                 result = {
                     "status": "transcription_failed",
                     "error": "stt_not_configured",
@@ -406,6 +417,10 @@ def submit_voice(
                 response_status = 503
                 outcome = "stt_not_configured"
             except stt.STTProviderError:
+                timings_ms["stt"] = round(
+                    (time.perf_counter() - stt_started) * 1000,
+                    2,
+                )
                 result = {
                     "status": "transcription_failed",
                     "error": "stt_unavailable",
@@ -414,6 +429,10 @@ def submit_voice(
                 response_status = 502
                 outcome = "stt_unavailable"
             else:
+                timings_ms["stt"] = round(
+                    (time.perf_counter() - stt_started) * 1000,
+                    2,
+                )
                 if not transcript:
                     result = {
                         "status": "unclear",
@@ -449,13 +468,9 @@ def submit_voice(
                                 else:
                                     result = pipeline.cancel_pending(int(pending_id))
                         else:
-                            def observe_extraction(extraction: Any) -> None:
-                                nonlocal extracted_json
-                                extracted_json = extraction.model_dump(mode="json")
-
                             result = pipeline.handle_text(
                                 transcript,
-                                extraction_observer=observe_extraction,
+                                request_id=request_id,
                             )
                     except sqlite3.OperationalError as error:
                         message = str(error).lower()
@@ -492,11 +507,6 @@ def submit_voice(
                         )
                     outcome = str(result.get("status", "completed"))
                     response_status = _voice_http_status(result, response_status)
-
-            timings_ms["stt"] = round(
-                (time.perf_counter() - stt_started) * 1000,
-                2,
-            )
 
     reply_text = _voice_reply(result, language)
     audio_data: dict[str, str] | None = None
@@ -538,8 +548,7 @@ def submit_voice(
 
     try:
         _write_voice_log(
-            transcript=transcript,
-            extracted_json=extracted_json,
+            request_id=request_id,
             timings_ms=timings_ms,
             outcome=outcome,
         )

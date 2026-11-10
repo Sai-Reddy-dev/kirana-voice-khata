@@ -1,22 +1,7 @@
 
-import os
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+TRANSCRIPT = "లక్ష్మి దగ్గర నుంచి పన్నెండు వందల రూపాయలు తీసుకున్నాను."
 
-load_dotenv()
-
-API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing in .env")
-
-client = genai.Client(api_key=API_KEY)
-
-transcript = "లక్ష్మి దగ్గర నుంచి పన్నెండు వందల రూపాయలు తీసుకున్నాను."
-
-
-prompt = f"""
+PROMPT_TEMPLATE = """
 You are a transaction extraction engine for a Telugu kirana shop ledger.
 
 Read the Telugu transcript carefully. Extract the customer, amount,
@@ -75,7 +60,7 @@ Transcript:
 """
 
 
-schema = {
+SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "customer_name": {"type": "STRING"},
@@ -103,19 +88,37 @@ schema = {
     ]
 }
 
-print("Sending Telugu transcript to Gemini...")
 
-response = client.models.generate_content(
-    model="gemini-3.5-flash",
-    contents=prompt,
-    config=types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_json_schema=schema,
-        temperature=0,
-    ),
-)
+def main() -> int:
+    import os
 
-print("Gemini response:")
-print(response.text)
-print("Parsed output:")
-print(response.parsed)
+    from dotenv import load_dotenv
+    from google import genai
+    from google.genai import types
+
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is missing in .env")
+
+    client = genai.Client(api_key=api_key)
+    prompt = PROMPT_TEMPLATE.format(transcript=TRANSCRIPT)
+    print("Sending Telugu transcript to Gemini...")
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=SCHEMA,
+            temperature=0,
+        ),
+    )
+    print("Gemini response:")
+    print(response.text)
+    print("Parsed output:")
+    print(response.parsed)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

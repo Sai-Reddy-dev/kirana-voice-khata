@@ -666,6 +666,7 @@ def handle_text(
     text: str,
     *,
     extraction_observer: Callable[[TransactionExtraction], None] | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     if not text.strip():
         return {
@@ -673,7 +674,13 @@ def handle_text(
             "question": "Please say or enter a transaction or question.",
         }
 
-    extracted = extractor.extract_transaction(text)
+    if request_id is None:
+        extracted = extractor.extract_transaction(text)
+    else:
+        extracted = extractor.extract_transaction(
+            text,
+            request_id=request_id,
+        )
     try:
         extraction = TransactionExtraction.model_validate(extracted)
     except ValidationError:

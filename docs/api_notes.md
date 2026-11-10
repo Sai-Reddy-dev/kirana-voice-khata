@@ -415,6 +415,13 @@ Before you begin, ensure you have:
 
 The JSON response includes `transcript`, the existing pipeline `result`, `spoken_reply`, optional base64 WAV `audio`, and `timings_ms` for STT, pipeline, TTS, and total server processing time. Read-only balance and summary results omit TTS audio. A spoken confirmation/cancellation calls the existing pending-entry operations; it does not rerun extraction.
 
+`timings_ms.stt` measures transcription only, and `timings_ms.pipeline` measures
+post-transcription decision/pipeline processing; `timings_ms.total` retains its
+existing whole-request meaning. Each voice request receives an internal request
+ID used to correlate extraction logs and local timing/outcome records. Local
+voice request records do not include transcripts or extracted customer/transaction
+details.
+
 ### Missing customer confirmation
 
 `POST /api/text` accepts an optional `pending_id` for a text decision. When a
